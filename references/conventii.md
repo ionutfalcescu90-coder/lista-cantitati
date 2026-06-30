@@ -68,6 +68,8 @@ a storey's elevation belong to that storey.
 | Vertical elements (walls + concrete columns) → level of the slab they SUPPORT (top elevation) | Revit tags verticals to their base level. Structurally a wall from floor N to floor N+1 supports the N+1 slab and belongs to that storey. Fixes empty top floor, floating basement walls, and absorbs a slab-less base level automatically. |
 | Beams & slabs → their own Revit level | They sit at one elevation; that elevation is their level. |
 | Concrete columns → `pereti` ("stalpi inclusi"); steel columns excluded | Steel tubular columns are not concrete/cofraj. Concrete = `Ortbeton`/`C##/##`/`BA` in the type name. |
+| The `pereti` row is **labelled by content**: only walls → "Pereti BA"; only columns → "Stalpi BA"; both → "Pereti BA (stalpi inclusi)" | A level with no walls (e.g. a frame parter/etaj) reads as "Stalpi BA", not the misleading "Pereti". Tracked via per-row `wall`/`col` counts. |
+| Beams whose type name contains `BS` (e.g. `GF BS` = grinda de fundatie beton simplu) → own category `fundatii_bs` | Continuous plain-concrete foundations are a different material: unreinforced and cast in the trench. Class via `CLASA_FUND_BS`, **no reinforcement, cofraj = 0** (like egalizare). Without this they fall into `grinzi` and wrongly pick up a BA reinforcement index. |
 | Atic walls → `placi`, excluded from built area | Parapets are not floor slabs; their footprint is negligible and must not inflate suprafata. |
 | Egalizare slabs → own category, class `C12/15`, cofraj 0, excluded from built area | Blinding is unreinforced, cast on ground, and shares the radier footprint — counting its area double-counts the footprint. |
 | Radier slabs → own category, own reinforcement index, cofraj = lateral edges only | The raft is cast on blinding (no soffit formwork) and is reinforced differently from suspended slabs. |
@@ -108,19 +110,44 @@ Each entry in `SHEETS` maps one IFC to one sheet. Fields:
  "clase": CLASE_SUPRA,                       # forced concrete classes per category
  "indici": INDICI_SUPRA,                     # reinforcement kg/mc per category
  "supr_inherit": {"4 - Parter": "5 - Parter dx"},  # partial-slab level borrows area
- "majorari": {"Etaj 1": 1.5}},               # uprate a level's quantities x factor
+ "majorari": {"Etaj 1": 1.5},                # uprate a level's quantities x factor
+ "scari": False,                             # disable the +3mc/+20mp stair allowance on placi
+ "placi_labels": {"_default": "Placa"}},     # per-level label for the placi row
 ```
 
 - Use the EXACT storey names from the recon (with the `"N - "` prefix) as keys in
-  `supr_inherit`; `indici`/`majorari` keys match the label after the prefix (`"Parter dx"`).
+  `supr_inherit`; `indici`/`majorari`/`placi_labels` keys match the label after the prefix
+  (`"Parter dx"`); `placi_labels` also takes a `"_default"`.
 - A corp without `Parter dx` should use an index set without the `Parter dx`/`Etaj 1`-slab
   specials (see `INDICI_SUPRA_NODX`).
+- `scari: False` for a corp that is only ground floor (no stairs) so placi rows don't get the
+  stair allowance; pair with `placi_labels` to drop "scari/reborduri" from the label.
 - A `tip: "cantitativ"` entry (no IFC) routes to the incinta/consolidare layout instead.
 
-## 5. Reinforcement indices
+## 5. Reinforcement — extracts first, indices only as fallback
 
-Armatura is **estimated** as `beton * indice (kg/mc)`. Indices are configured per category
-with optional per-level overrides and a `_default`:
+If the project has rebar extracts (`extras de armare`), **use the real kg, do not estimate**.
+Configure `ARMATURA_EXTRAS[sheet][(nivel, categorie)] = [components]`:
+
+- Parse each `*E_EXTRAS*.pdf` for `Greutate totala` (the recapitulatie total kg). PyMuPDF
+  (`fitz`) + regex `r'Greutate totala\s*\n\s*([\d.,]+)'` reads it directly; the per-marca
+  rows sum to that total.
+- Each cell value is a **list of components**. With >1 component the H cell is written as a
+  formula `=a+b+c` so the contributors stay identifiable in Excel; with one it's a plain value.
+- Group `mustati` (starter bars) with the element they reinforce. Foundation starters
+  (mustati pereti, mustati stalpi) usually belong to the **radier** (or the foundation beam
+  they are cast in) — the extract for "armare fundatii" often already covers the foundation
+  beams' reinforcement.
+- An **empty list `[]`** means "counted elsewhere" → the H cell is left blank (e.g. grinzi de
+  fundare whose steel is inside the radier extract). This avoids double counting.
+- **A sheet listed in `ARMATURA_EXTRAS` never uses indices**: any (nivel, categorie) without
+  an entry is left blank, not estimated. So the sheet total equals the sum of the extracts
+  exactly (plus any explicit manual additions you add as extra list components, e.g. a stair).
+- Verify: sum of all `Greutate totala` across the extract PDFs must equal the workbook total.
+
+Indices below are the **fallback** when there are no extracts. Armatura is then estimated as
+`beton * indice (kg/mc)`, configured per category with optional per-level overrides and a
+`_default`:
 
 ```python
 INDICI_SUPRA = {

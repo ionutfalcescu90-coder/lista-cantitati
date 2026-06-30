@@ -21,7 +21,7 @@ FAZA    = "SD"                            # faza de proiectare (SD / DTAC / PT .
 PROIECTANT = "PROIECTANT SRL"             # completeaza cu numele firmei de proiectare
 
 # Note standard (text propriu, completeaza notele preluate din template)
-NOTA_ARMATURA = "Armatura este estimata pe baza de indici de consum (kg/mc)."
+NOTA_ARMATURA = "Armatura este preluata din extrasele de armare; in lipsa lor, se estimeaza din indici de consum (kg/mc)."
 NOTA_ACOPERIS = "Nu sunt cuprinse elementele de acoperis (confectii metalice / structura de lemn)."
 TEMPLATE_NOTE = ""                        # nume fisier template de unde se preiau notele (gol = fara)
 
@@ -54,13 +54,15 @@ def citeste_note_template(folder):
 
 # Clase beton fixe per tip element (ignora ce vine din IFC)
 # None = preia din IFC
+CLASA_FUND_BS = "C12/15"               # fundatii continue din beton simplu (grinzi "GF BS")
 CLASE_INFRA = {
-    "radier":    "C35/45 (XC2+XF3)",
-    "pereti":    "C35/45 (XC2)",
-    "grinzi":    "C35/45 (XC2)",
-    "placi":     "C35/45 (XC2+XF3)",   # placi pastrate tot C35/45
-    "atic":      "C35/45 (XC2)",
-    "egalizare": "C12/15",
+    "radier":      "C35/45 (XC2+XF3)",
+    "fundatii_bs": CLASA_FUND_BS,      # talpa / fundatii continue beton simplu (nearmat, fara cofraj)
+    "pereti":      "C35/45 (XC2)",
+    "grinzi":      "C35/45 (XC2)",
+    "placi":       "C35/45 (XC2+XF3)", # placi pastrate tot C35/45
+    "atic":        "C35/45 (XC2)",
+    "egalizare":   "C12/15",
 }
 # Indici de armare infrastructura (kg/mc)
 INDICI_INFRA = {
@@ -92,12 +94,32 @@ INDICI_SUPRA_NODX = {
     "placi":  {"_default": 105},
 }
 
+# Armatura REALA preluata din extrasele de armare (kg), per sheet -> {(nivel, categorie): [componente]}.
+# Daca un sheet apare aici, pe ACEL sheet NU se mai folosesc indici (armatura = doar din extrase).
+# Valoarea e o LISTA de componente -> cand sunt >1 se scrie ca formula Excel (=a+b+c), identificabila.
+# Lista goala [] = armatura numarata in alta parte (ex: grinzi de fundare incluse in extrasul radierului).
+# Cheia nivelului = eticheta fara prefixul "N - " (vezi recon). Exemplu:
+#   ARMATURA_EXTRAS = {
+#       "Suprastructura T1.E": {
+#           ("Fundatii", "radier"): [1812.67, 534.34],   # armare radier + mustati (din extrase)
+#           ("Subsol",   "grinzi"): [],                   # grinzi de fundare numarate la radier
+#           ("Parter",   "placi"):  [846.44, 250.0],      # extras placa + adaos scara
+#       },
+#   }
+ARMATURA_EXTRAS = {}   # gol => armatura estimata din indici (INDICI_*)
+
+# Etichete pentru randul "placi" per nivel (cheia = nivel fara prefix; "_default" = restul).
+# Folositor cand scara/rebordurile exista doar pe anumite niveluri. Optional per sheet (vezi SHEETS).
+PLACI_LABELS_DEFAULT = {"_default": "Placi, scari, reborduri"}
+
 # Ordinea sheet-urilor si IFC-ul asociat. EXEMPLU de configurare — inlocuieste
 # numele fisierelor IFC (din folderul scriptului) cu cele ale proiectului tau.
 #   "tip": "cantitativ"  -> sheet de tip lista de cantitati (incinta/consolidare)
 #   "ifc": None          -> sheet gol (structura, completat ulterior)
 #   "supr_inherit"       -> nivel cu placi partiale preia suprafata de la alt nivel
 #   "majorari"           -> majoreaza cantitatile unui nivel cu un factor (nivel nemodelat)
+#   "scari": False       -> dezactiveaza adaosul de scara (+3mc/+20mp) la placi (corp doar parter etc.)
+#   "placi_labels"       -> dict {nivel: eticheta} pt randul placi (ex: doar "Placa")
 SHEETS = [
     {"name": "Incinta si Consolidare teren", "tip": "cantitativ"},
     {"name": "Infrastructura",      "titlu": "INFRASTRUCTURA",                    "ifc": "infrastructura.ifc",  "clase": CLASE_INFRA, "indici": INDICI_INFRA},
@@ -205,8 +227,9 @@ def get_indice(indici, cat, level_name):
 
 CAT_LABEL = {"pereti":"Pereti BA","grinzi":"Grinzi BA",
              "placi":"Placi, scari, reborduri","atic":"Atic BA",
-             "egalizare":"Beton simplu egalizare","radier":"Radier"}
-CAT_ORDER = ["egalizare","radier","pereti","grinzi","placi","atic"]
+             "egalizare":"Beton simplu egalizare","radier":"Radier",
+             "fundatii_bs":"Fundatii continue beton simplu (BS)"}
+CAT_ORDER = ["egalizare","fundatii_bs","radier","pereti","grinzi","placi","atic"]
 
 def is_stalp_beton(tn):
     # stalp de beton: "Ortbeton" / contine clasa C##/## / "BA"; otelul (RO/EN tubular) = nu
@@ -221,7 +244,9 @@ def categorize(el):
         return "placi" if "Atic" in (tn or "") else "pereti"  # atic -> adaugat la placi
     if cls == "IfcColumn":
         return "pereti" if is_stalp_beton(tn) else None  # stalpi beton -> la pereti; otel -> exclus
-    if cls == "IfcBeam": return "grinzi"
+    if cls == "IfcBeam":
+        # "GF BS" = grinda de fundatie din beton simplu (fundatii continue, nearmat) -> articol propriu
+        return "fundatii_bs" if re.search(r'\bBS\b', tn or "") else "grinzi"
     if cls == "IfcSlab":
         t = (tn or "").lower()
         if "egalizare" in t: return "egalizare"
@@ -273,7 +298,7 @@ def process_ifc(ifc_path):
         # nivelul a carui cota e cea mai apropiata de z
         return min(elevs, key=lambda ne: abs(ne[1] - z))[0]
 
-    rezultate    = defaultdict(lambda: defaultdict(lambda: {"clasa":"-","vol":0.0,"cof":0.0,"nr":0}))
+    rezultate    = defaultdict(lambda: defaultdict(lambda: {"clasa":"-","vol":0.0,"cof":0.0,"nr":0,"wall":0,"col":0}))
     supr_nivel   = defaultdict(float)
     elemente     = (ifc.by_type("IfcWall") + ifc.by_type("IfcColumn")
                     + ifc.by_type("IfcBeam") + ifc.by_type("IfcSlab"))
@@ -297,14 +322,16 @@ def process_ifc(ifc_path):
             sname = storey_map.get(el.id(), "Fara nivel")
 
         cof = cofraj_val(el.is_a(), area_tot, area_h)
-        if cat == "egalizare":
-            cof = 0.0                       # beton simplu turnat pe teren — fara cofraj
+        if cat in ("egalizare", "fundatii_bs"):
+            cof = 0.0                       # beton simplu turnat direct in sapatura — fara cofraj
         elif cat == "radier":
             cof = area_tot - area_h         # doar cofrajul lateral (cant), intradosul e pe egalizare
 
         d = rezultate[sname][cat]
         d["clasa"] = extract_clasa_beton(get_type_name(el))
         d["vol"]  += vol; d["cof"] += cof; d["nr"] += 1
+        if el.is_a() in ("IfcWall", "IfcWallStandardCase"): d["wall"] += 1
+        elif el.is_a() == "IfcColumn":                       d["col"]  += 1
         # suprafata construita = amprenta placilor reale (NU egalizarea, aceeasi amprenta)
         if el.is_a() == "IfcSlab" and cat != "egalizare":
             supr_nivel[sname] += area_h / 2.0
@@ -317,7 +344,7 @@ def process_ifc(ifc_path):
 HEADER_ROWS = 6   # randuri de antet inainte de date
 
 def write_sheet(ws, titlu, rezultate, storey_order, supr_nivel, clase=None, indici=None,
-                majorari=None, notes=None):
+                majorari=None, notes=None, scari=True, arm_extras=None, placi_labels=None):
     """Scrie un sheet complet. rezultate=None => sheet gol cu structura."""
 
     all_levels = [l for l in storey_order if l in (rezultate or {})]
@@ -431,6 +458,13 @@ def write_sheet(ws, titlu, rezultate, storey_order, supr_nivel, clase=None, indi
         for ci, cat_key in enumerate(cats_present):
             d     = cat_data[cat_key]
             label = CAT_LABEL.get(cat_key, cat_key)
+            if cat_key == "pereti":
+                # eticheta dupa continut: doar pereti / doar stalpi / amestec
+                if d["col"] > 0 and d["wall"] == 0:   label = "Stalpi BA"
+                elif d["wall"] > 0 and d["col"] > 0:  label = "Pereti BA (stalpi inclusi)"
+                else:                                  label = "Pereti BA"
+            elif cat_key == "placi" and placi_labels:
+                label = placi_labels.get(nivel_label(level), placi_labels.get("_default", label))
             vol   = round(d["vol"], 3)
             cof_v = round(d["cof"], 2)
             r     = row
@@ -441,14 +475,24 @@ def write_sheet(ws, titlu, rezultate, storey_order, supr_nivel, clase=None, indi
             ws.cell(row=r, column=CN, value=FACTOR_BETON)
             ws.cell(row=r, column=CO, value=cof_v)
             ws.cell(row=r, column=CP, value=FACTOR_COFRAJ)
-            idx = get_indice(indici, cat_key, level)        # indice armare kg/mc
-            ws.cell(row=r, column=CR, value=idx if idx is not None else "")
+            # Armatura: valoare reala din extras (lista de componente) daca exista cheia.
+            # Cheie absenta pe un sheet cu extrase -> gol (nu estimam). Lista goala -> gol
+            # (numarata in alta parte). Sheet fara extrase -> indice estimat.
+            akey = (nivel_label(level), cat_key)
+            sheet_are_extrase = bool(arm_extras)
+            has_extras = sheet_are_extrase and akey in arm_extras
+            arm_real = arm_extras.get(akey) if has_extras else None
+            idx = get_indice(indici, cat_key, level)        # indice armare kg/mc (doar fara extrase)
+            ws.cell(row=r, column=CR, value="" if sheet_are_extrase
+                                            else (idx if idx is not None else ""))
 
             # Formule coloane principale
             ws.cell(row=r, column=CB,  value=label)
-            # Placi: +3mc/nivel pt scari nemodulate. fx = majorare nivel (vizibila in formula).
-            base_b = f"{col(CM)}{r}*{col(CN)}{r}" + ("+3" if cat_key=="placi" else "")
-            base_c = f"{col(CO)}{r}*{col(CP)}{r}" + ("+20" if cat_key=="placi" else "")
+            # Placi: +3mc/nivel pt scari nemodelate (doar daca scari=True pt corp).
+            # fx = majorare nivel (vizibila in formula).
+            placi_alloc = scari and cat_key == "placi"
+            base_b = f"{col(CM)}{r}*{col(CN)}{r}" + ("+3" if placi_alloc else "")
+            base_c = f"{col(CO)}{r}*{col(CP)}{r}" + ("+20" if placi_alloc else "")
             if fx:
                 ws.cell(row=r, column=CD, value=f"=({base_b}){fx}")
                 ws.cell(row=r, column=CF, value=f"=({base_c}){fx}")
@@ -457,7 +501,17 @@ def write_sheet(ws, titlu, rezultate, storey_order, supr_nivel, clase=None, indi
                 ws.cell(row=r, column=CF, value=f"={base_c}")
             ws.cell(row=r, column=CE,  value=f"=IFERROR({col(CD)}{r}/{k_ref},\"-\")")
             ws.cell(row=r, column=CG,  value=f"=IFERROR({col(CF)}{r}/{k_ref},\"-\")")
-            ws.cell(row=r, column=CH,  value=f"=IF({col(CR)}{r}>0,{col(CD)}{r}*{col(CR)}{r},\"\")")
+            if has_extras:
+                if not arm_real:                              # lista goala -> gol (numarata in alta parte)
+                    ws.cell(row=r, column=CH, value="")
+                elif len(arm_real) > 1:                        # >1 componenta -> formula (=a+b+c)
+                    ws.cell(row=r, column=CH, value="=" + "+".join(f"{v:.2f}" for v in arm_real))
+                else:                                          # 1 componenta -> valoare (2 zec, ca extrasul)
+                    ws.cell(row=r, column=CH, value=round(arm_real[0], 2))
+            elif sheet_are_extrase:
+                ws.cell(row=r, column=CH, value="")            # sheet cu extrase, fara override -> gol (nu estimam)
+            else:
+                ws.cell(row=r, column=CH, value=f"=IF({col(CR)}{r}>0,{col(CD)}{r}*{col(CR)}{r},\"\")")
             ws.cell(row=r, column=CI,  value=f"=IFERROR({col(CH)}{r}/{col(CD)}{r},\"\")")
 
             # Stiluri celule principale (A-K) — stil UNITAR, fara diferenta armat
@@ -720,7 +774,7 @@ def write_centralizator(ws, corpuri):
     ws.merge_cells(f"A{r}:J{r}")
     nota=ws.cell(row=r,column=1,value="Preturile unitare sunt estimative si editabile (celulele galbene C3:C5). "
                 "Cantitatile sunt preluate automat din sheet-urile fiecarui corp. "
-                "Armatura rezulta din indicii de armare; €/mp = cost total / suprafata construita desfasurata. "
+                "Armatura rezulta din extrasele de armare (sau din indici, in lipsa lor); €/mp = cost total / suprafata construita desfasurata. "
                 "NU sunt cuprinse elementele de acoperis (confectii metalice / structura de lemn). "
                 "Corp Nord: Etajul 1 este majorat cu ~50% ca alocare pentru mansarda nemodelata.")
     sc(nota, fill=C_ROW0, align="left", font=Font(italic=True,size=9,color="666666"))
@@ -919,7 +973,10 @@ if __name__=="__main__":
                         supr_nivel[nivel_src] = supr_nivel[nivel_ref]
                         print(f"    Suprafata '{nivel_src}' -> preluata de la '{nivel_ref}': {supr_nivel[nivel_ref]:.0f} mp")
                 tot_row = write_sheet(ws, titlu, rezultate, storey_order, supr_nivel,
-                                      clase=clase, indici=indici, majorari=majorari, notes=notes)
+                                      clase=clase, indici=indici, majorari=majorari, notes=notes,
+                                      scari=sheet_cfg.get("scari", True),
+                                      arm_extras=ARMATURA_EXTRAS.get(sname),
+                                      placi_labels=sheet_cfg.get("placi_labels"))
             else:
                 print(f"  IFC negasit: {ifc_f} — sheet gol")
                 write_sheet(ws, titlu, None, [], {}, clase=clase, indici=indici)

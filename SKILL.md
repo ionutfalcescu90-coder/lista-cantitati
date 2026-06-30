@@ -75,6 +75,14 @@ implemented in the script; understand them so you can explain and adjust:
 - **Egalizare** (blinding, `C12/15`) and **radier** (raft) slabs are split into their own
   categories so they get the right class and reinforcement index and the radier footprint
   is counted once (egalizare shares the same footprint — never sum both into the area).
+- **Beton simplu continuous foundations** (`GF BS` beams) get their own `fundatii_bs`
+  category: unreinforced, no formwork — never lump them into `grinzi` BA. The `pereti` row is
+  auto-labelled "Pereti BA" / "Stalpi BA" / "Pereti BA (stalpi inclusi)" by what the level
+  actually contains.
+- **Reinforcement: use extracts when available.** If the project ships rebar extracts
+  (`extras de armare`), set `ARMATURA_EXTRAS` with the real kg per element and the indices
+  are bypassed on that sheet — the workbook total then equals the sum of the extracts.
+  Estimate from indices only when there are no extracts. See `references/conventii.md` § 5.
 
 ## Geometry
 
